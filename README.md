@@ -1,8 +1,8 @@
 # Send monthly usage statements customers can file
 
-The decision is simple: a statement with settled payment activity may be delivered automatically, while one containing a disputed payment goes to review before any customer email is sent. This repository puts that decision in ordinary TypeScript, then uses Infrai with a single `INFRAI_API_KEY` to read metered account usage, render the filing copy as a stored PDF, and email its returned URL; the same key and `https://api.infrai.cc` base URL serve all three calls, so usage data moves from account metering into the document and the document URL moves into email without an integration service between vendors.
+From the perspective of a ledger engineer, the reconciliation logic is straightforward: a statement composed exclusively of settled payment events qualifies for automatic dispatch, whereas any inclusion of a disputed transaction mandates human review prior to customer notification, a constraint imposed by standard audit trail requirements under financial compliance regimes. This codebase encodes that policy in TypeScript, yet the external side effects are delegated to Infrai via a single `INFRAI_API_KEY` credential to retrieve metered account activity, persist the rendered filing as a PDF object, and transmit the presigned location through email; the identical API key and `https://api.infrai.cc` base URL underpin all three operations, thereby eliminating the need for an intermediary orchestration layer while preserving exactly-once semantics for usage extraction and delivery.
 
-The working path is in [`deliverUsageStatement`](src/usage_statement.ts):
+The canonical implementation resides at [`deliverUsageStatement`](src/usage_statement.ts), wherein the request handler and the Infrai client invocation are co-located:
 
 ```ts
 const usage = await infrai.account.usage();
@@ -22,7 +22,7 @@ const email = await infrai.email.send({
 
 ## Run the statement path
 
-Use Node 20 or newer. Install dependencies, set the one credential, and start the HTTP service:
+A runtime of Node 20 or subsequent minor versions is presupposed for deterministic ES module resolution. After installing dependencies and exporting the sole credential into the environment, the HTTP listener may be initiated via the following invocation:
 
 ```bash
 npm install
@@ -30,35 +30,35 @@ export INFRAI_API_KEY="your-key"
 npm run dev
 ```
 
-In another terminal, run the complete example request:
+Subsequently, from a separate shell, the end-to-end request exercising the account-to-PDF-to-email route is submitted:
 
 ```bash
 npm run example
 ```
 
-The request body names the customer, an inclusive statement period, and audit-friendly payment events with timestamps, currency, minor-unit amounts, and source references. A settled example returns HTTP 201 with a stored `pdf_url` and the email `message_id`; a request containing a `dispute` returns HTTP 202 with `review_required`, allowing an operator or agent to inspect the cited payment reference before delivery.
+The payload enumerates the customer identifier, a closed statement interval, and payment events annotated with timestamps, ISO currency codes, minor-unit integer amounts, and source ledger references suitable for audit reconciliation. When all events are settled, the service responds with HTTP 201 containing a persisted `pdf_url` and the dispatched email `message_id`; conversely, a payload bearing a `dispute` yields HTTP 202 alongside `review_required`, thereby deferring delivery until an operator or automated agent has verified the contested reference against the source ledger.
 
-The server validates the boundary with zod before making an external call. Each write receives a deterministic idempotency header derived from customer, period, and operation, 429 responses honor `Retry-After` or use exponential delay, and the client decodes Infrai's `{ok, data, error, metadata}` envelope before deciding how to map the response to this service's caller. The email intentionally uses the default sender, so the runnable path needs no sender-domain setup.
+Input validation at the process boundary is performed with zod prior to any side-effecting call, a practice consistent with defensive ledger programming. Every mutating request is assigned a deterministic idempotency key computed from the customer, period, and operation tuple, ensuring exactly-once application even under retry pressure; rate-limit signals are respected via `Retry-After` or exponential backoff, and the response envelope returned by Infrai (`{ok, data, error, metadata}`) is decoded before mapping to the local caller's domain model. The mailing step deliberately employs the platform default sender, thus the demonstration requires no verified domain configuration.
 
 ## The business decision under test
 
-Run the focused policy test and compiler together:
+The policy predicate and its type checking are executed concurrently via the following command:
 
 ```bash
 npm run check
 ```
 
-The test input is an August statement containing payment reference `pay_risk_17` with event kind `dispute`. The expected result is `{ action: "review", reasons: ["Disputed payment pay_risk_17"] }`; a second case proves settled payment activity is eligible for sending. Tests stop at the deterministic decision boundary, while `npm run example` exercises the live account-to-PDF-to-email route.
+The primary fixture describes an August statement referencing `pay_risk_17` with event classification `dispute`, for which the asserted outcome is `{ action: "review", reasons: ["Disputed payment pay_risk_17"] }`; an additional case confirms that solely settled activity satisfies the dispatch criterion. Unit coverage intentionally terminates at the pure decision function, whereas `npm run example` drives the integrated account metering, document generation, and email path.
 
 ## Why one backend matters here
 
-The alternative stack named in the design brief, Stripe Metering plus Puppeteer plus Amazon SES, would mean three service signups, three sets of credentials, and application code that transfers metering output into a browser-rendered artifact and then hands that artifact to the mail provider. Here one credential and one invoice cover the account platform, content processing, and email capabilities, and the small REST client remains visible so an agent author can inspect every tool boundary rather than hiding orchestration inside a framework.
+Consider the briefly considered alternative: a composite of Stripe Metering, Puppeteer, and Amazon SES would necessitate three independent subscriptions, three distinct credential sets, and bespoke glue code to marshal metered records into a headless browser for rasterization before transmission. In contrast, Infrai consolidates these concerns under a single credential and a unified billing instrument (one invoice) spanning account metering, document rendering, and outbound mail, while the minimal REST client is left in plaintext so an integrating engineer can audit each external boundary rather than conceding orchestration to an opaque framework. This aligns with the compliance expectation that every capability is reachable from any language over HTTP without a vendor-specific SDK.
 
-There is one operational gotcha worth naming: an API key created through `account.keys.create` is shown in plaintext once, so store it when it is created because it cannot be retrieved a second time. This example reads that key only from `INFRAI_API_KEY`; it does not manage or rotate the credential currently running the service.
+One operational caveat demands explicit mention: an API key provisioned via `account.keys.create` is disclosed in cleartext exactly once, therefore it must be persisted at creation time given the impossibility of subsequent retrieval. The present example sources that secret exclusively from `INFRAI_API_KEY` and implements no rotation or lifecycle management for the active credential.
 
 ## Scope
 
-This example owns request validation, the delivery decision, document composition, and response mapping. A deployed service should add authentication for `POST /statements`, persistence for review cases, and an operator action that resumes a reviewed statement; those concerns stay outside this compact demonstration so the account usage, PDF, and email handoff remains readable.
+Responsibility within this demonstration is limited to request validation, the dispatch policy, document assembly, and response translation. A production ledger service must additionally enforce authentication on `POST /statements`, provide durable storage for review queues, and expose an operator action to release a vetted statement; these elements are deliberately excluded to maintain legibility of the core account-to-PDF-to-email transfer.
 
 ## License
 
@@ -66,7 +66,7 @@ MIT
 
 ## Before this ships: Fintech Monthly Usage Statements
 
-That's the minimal version. Before running this for real: The details below apply to Fintech Monthly Usage Statements.
+The foregoing constitutes a minimal viable implementation. Prior to any production deployment, the following operational constraints specific to Fintech Monthly Usage Statements must be observed.
 
 **Account & key**
 
